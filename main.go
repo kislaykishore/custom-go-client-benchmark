@@ -185,6 +185,10 @@ func ReadObject(ctx context.Context, workerID int, bucketHandle *storage.BucketH
 
 func main() {
 	flag.Parse()
+	fmt.Printf("Start time: %s\n", time.Now().String())
+	defer func() {
+		fmt.Printf("End time: %s\n", time.Now().String())
+	}()
 	ctx := context.Background()
 
 	var client *storage.Client

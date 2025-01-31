@@ -140,7 +140,7 @@ func rampUp(warmupCtx context.Context, cancelFn context.CancelFunc, bucketHandle
 				return
 			}
 			time.Sleep(1 * time.Second)
-			fmt.Printf("Ramping up for idx: %d\n", idx)
+			//fmt.Printf("Ramping up for idx: %d\n", idx)
 			eG.Go(func() error {
 				_, err := ReadObject(warmupCtx, idx, bucketHandle)
 				if err != nil {

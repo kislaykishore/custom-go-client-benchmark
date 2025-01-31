@@ -186,9 +186,6 @@ func ReadObject(ctx context.Context, workerID int, bucketHandle *storage.BucketH
 func main() {
 	flag.Parse()
 	fmt.Printf("Workload start time: %s\n", time.Now().String())
-	defer func() {
-		fmt.Printf("Workload end time: %s\n\n", time.Now().String())
-	}()
 	ctx := context.Background()
 
 	var client *storage.Client
@@ -253,9 +250,11 @@ func main() {
 
 	if err == nil && err != context.DeadlineExceeded {
 		fmt.Printf("Protocol: %s, Bandwidth: %d MiB/s\n", protocol, totalBytesRead.Load()/(int64(totalDuration.Seconds())*MiB))
+		fmt.Printf("Workload end time: %s\n\n", time.Now().String())
 		os.Exit(0)
 	} else {
 		fmt.Fprintf(os.Stderr, "Error while running benchmark: %v", err)
+		fmt.Printf("Workload end time: %s\n\n", time.Now().String())
 		os.Exit(1)
 	}
 }

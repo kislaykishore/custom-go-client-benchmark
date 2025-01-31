@@ -35,9 +35,9 @@ var (
 
 	numOfWorker = flag.Int("worker", 128, "Number of concurrent worker to read")
 
-	numOfReadCallPerWorker = flag.Int("read-call-per-worker", 10000, "Number of read call per worker")
+	runTime = flag.Duration("run-time", 3*time.Minute, "Actual workload runtime")
 
-	warmUpTime = flag.Duration("warm-up-time", 2*time.Minute, "Ramp up time")
+	warmUpTime = flag.Duration("warm-up-time", 2*time.Second, "Ramp up time")
 
 	maxRetryDuration = 30 * time.Second
 
@@ -142,7 +142,7 @@ func rampUp(warmupCtx context.Context, cancelFn context.CancelFunc, bucketHandle
 			time.Sleep(1 * time.Second)
 			fmt.Printf("Ramping up for idx: %d\n", idx)
 			eG.Go(func() error {
-				_, err := ReadObject(warmupCtx, idx, -1, bucketHandle)
+				_, err := ReadObject(warmupCtx, idx, bucketHandle)
 				if err != nil {
 					err = fmt.Errorf("while reading object %v: %w", *objectNamePrefix+strconv.Itoa(idx)+*objectNameSuffix, err)
 					return err
@@ -164,26 +164,28 @@ func CreateGrpcClient(ctx context.Context) (client *storage.Client, err error) {
 }
 
 // ReadObject creates reader object corresponding to workerID with the help of bucketHandle.
-func ReadObject(ctx context.Context, workerID int, numCalls int64, bucketHandle *storage.BucketHandle) (bytesRead int64, err error) {
+func ReadObject(ctx context.Context, workerID int, bucketHandle *storage.BucketHandle) (bytesRead int64, err error) {
 	objectName := *objectNamePrefix + strconv.Itoa(workerID) + *objectNameSuffix
 
-	for i := int64(0); i < numCalls || numCalls == -1; i++ {
+	select {
+	case <-ctx.Done():
+		return 0, nil
+	default:
 		object := bucketHandle.Object(objectName)
 		rc, err := object.NewReader(ctx)
 		if err != nil {
 			return 0, fmt.Errorf("while creating reader object: %v", err)
 		}
+		defer rc.Close()
 
 		// Calls Reader.WriteTo implicitly.
 		count, err := io.Copy(io.Discard, rc)
-		rc.Close()
 		bytesRead += count
 		if err != nil {
-			return 0, fmt.Errorf("while reading and discarding content: %v", err)
+			return bytesRead, fmt.Errorf("while reading and discarding content: %v", err)
 		}
+		return bytesRead, nil
 	}
-
-	return bytesRead, nil
 }
 
 func main() {
@@ -256,25 +258,31 @@ func main() {
 	startTime := time.Now()
 	var eG errgroup.Group
 
+	actualRunCtx, cancelFn := context.WithDeadline(ctx, startTime.Add(*runTime))
+	defer cancelFn()
+
 	// Run the actual workload
 	for i := 0; i < *numOfWorker; i++ {
 		idx := i
 		eG.Go(func() error {
-			bytesRead, err := ReadObject(ctx, idx, int64(*numOfReadCallPerWorker), bucketHandle)
-			if err != nil {
-				err = fmt.Errorf("while reading object %v: %w", *objectNamePrefix+strconv.Itoa(idx)+*objectNameSuffix, err)
-				return err
+			fmt.Printf("Worker %d started\n", idx)
+			for {
+				select {
+				case <-actualRunCtx.Done():
+					return nil
+				default:
+					bytesRead, _ := ReadObject(actualRunCtx, idx, bucketHandle)
+					fmt.Printf("Worker returned after reading %d bytes\n", bytesRead)
+					totalBytesRead.Add(bytesRead)
+				}
 			}
-			fmt.Printf("Worker returned after reading %d bytes\n", bytesRead)
-			totalBytesRead.Add(bytesRead)
-			return err
 		})
 	}
 
 	err = eG.Wait()
 	totalDuration := time.Since(startTime)
 
-	if err == nil {
+	if err == nil && err != context.DeadlineExceeded {
 		fmt.Printf("Read benchmark completed successfully! Bandwidth: %d MiB/s\n", totalBytesRead.Load()/(int64(totalDuration.Seconds())*MiB))
 		os.Exit(0)
 	} else {

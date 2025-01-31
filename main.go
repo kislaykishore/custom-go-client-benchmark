@@ -272,7 +272,6 @@ func main() {
 					return nil
 				default:
 					bytesRead, _ := ReadObject(actualRunCtx, idx, bucketHandle)
-					fmt.Printf("Worker returned after reading %d bytes\n", bytesRead)
 					totalBytesRead.Add(bytesRead)
 				}
 			}

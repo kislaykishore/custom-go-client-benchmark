@@ -35,7 +35,7 @@ var (
 
 	numOfWorker = flag.Int("worker", 1, "Number of concurrent worker to read")
 
-	numOfReadCallPerWorker = flag.Int("read-call-per-worker", 100000, "Number of read call per worker")
+	numOfReadCallPerWorker = flag.Int("read-call-per-worker", 10000, "Number of read call per worker")
 
 	warmUpTime = flag.Duration("warm-up-time", 2*time.Minute, "Ramp up time")
 

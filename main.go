@@ -8,21 +8,18 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sync/atomic"
+
 	// Register the pprof endpoints under the web server root at /debug/pprof
 	_ "net/http/pprof"
 	"os"
 	"strconv"
 	"time"
 
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
-
 	"cloud.google.com/go/profiler"
 	"cloud.google.com/go/storage"
 	"cloud.google.com/go/storage/experimental"
 	"github.com/googleapis/gax-go/v2"
-	"go.opencensus.io/stats"
 	"golang.org/x/oauth2"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/api/option"
@@ -31,31 +28,33 @@ import (
 var (
 	grpcConnPoolSize    = 1
 	maxConnsPerHost     = 100
-	maxIdleConnsPerHost = 100
+	maxIdleConnsPerHost = 0
 
 	// MB means 1024 Kb.
-	MB = 1024 * 1024
+	MiB = int64(1024 * 1024)
 
-	numOfWorker = flag.Int("worker", 48, "Number of concurrent worker to read")
+	numOfWorker = flag.Int("worker", 1, "Number of concurrent worker to read")
 
-	numOfReadCallPerWorker = flag.Int("read-call-per-worker", 1000000, "Number of read call per worker")
+	numOfReadCallPerWorker = flag.Int("read-call-per-worker", 100000, "Number of read call per worker")
+
+	warmUpTime = flag.Duration("warm-up-time", 2*time.Minute, "Ramp up time")
 
 	maxRetryDuration = 30 * time.Second
 
 	retryMultiplier = 2.0
 
-	bucketName = flag.String("bucket", "princer-working-dirs", "GCS bucket name.")
+	bucketName = flag.String("bucket", "kislayk_europe_west4", "GCS bucket name.")
 
 	// ProjectName denotes gcp project name.
-	ProjectName = flag.String("project", "gcs-fuse-test", "GCP project name.")
+	ProjectName = flag.String("project", "tpu-prod-env-one-vm", "GCP project name.")
 
-	clientProtocol   = flag.String("client-protocol", "http", "Network protocol.")
+	clientProtocol = flag.String("client-protocol", "http", "Network protocol.")
 
 	// Object name = objectNamePrefix + {thread_id} + objectNameSuffix
-	objectNamePrefix = flag.String("obj-prefix", "princer_100M_files/file_", "Object prefix")
-	objectNameSuffix = flag.String("obj-suffix", "", "Object suffix")
+	objectNamePrefix = flag.String("obj-prefix", "1GB/experiment.", "Object prefix")
+	objectNameSuffix = flag.String("obj-suffix", ".0", "Object suffix")
 
-	tracerName      = "princer-storage-benchmark"
+	tracerName      = "kislayk-storage-benchmark"
 	enableTracing   = flag.Bool("enable-tracing", false, "Enable tracing with Cloud Trace export")
 	enablePprof     = flag.Bool("enable-pprof", false, "Enable pprof server")
 	traceSampleRate = flag.Float64("trace-sample-rate", 1.0, "Sampling rate for Cloud Trace")
@@ -72,8 +71,6 @@ var (
 
 	// Enable read stall retry.
 	enableReadStallRetry = flag.Bool("enable-read-stall-retry", false, "Enable read stall retry")
-
-	eG errgroup.Group
 )
 
 // CreateHTTPClient create http storage client.
@@ -121,11 +118,40 @@ func CreateHTTPClient(ctx context.Context, isHTTP2 bool) (client *storage.Client
 	if *enableReadStallRetry {
 		return storage.NewClient(ctx, option.WithHTTPClient(httpClient),
 			experimental.WithReadStallTimeout(&experimental.ReadStallTimeoutConfig{
-				Min: time.Second,
+				Min:              time.Second,
 				TargetPercentile: 0.99,
 			}))
 	}
 	return storage.NewClient(ctx, option.WithHTTPClient(httpClient))
+}
+
+func rampUp(warmupCtx context.Context, cancelFn context.CancelFunc, bucketHandle *storage.BucketHandle) {
+	idx := 0
+	var eG errgroup.Group
+	for {
+		select {
+		case <-warmupCtx.Done():
+			cancelFn()
+			return
+		default:
+			if idx == *numOfWorker {
+				fmt.Println("Waiting")
+				eG.Wait()
+				return
+			}
+			time.Sleep(1 * time.Second)
+			fmt.Printf("Ramping up for idx: %d\n", idx)
+			eG.Go(func() error {
+				_, err := ReadObject(warmupCtx, idx, -1, bucketHandle)
+				if err != nil {
+					err = fmt.Errorf("while reading object %v: %w", *objectNamePrefix+strconv.Itoa(idx)+*objectNameSuffix, err)
+					return err
+				}
+				return err
+			})
+			idx++
+		}
+	}
 }
 
 // CreateGrpcClient creates grpc client.
@@ -138,42 +164,26 @@ func CreateGrpcClient(ctx context.Context) (client *storage.Client, err error) {
 }
 
 // ReadObject creates reader object corresponding to workerID with the help of bucketHandle.
-func ReadObject(ctx context.Context, workerID int, bucketHandle *storage.BucketHandle) (err error) {
-
+func ReadObject(ctx context.Context, workerID int, numCalls int64, bucketHandle *storage.BucketHandle) (bytesRead int64, err error) {
 	objectName := *objectNamePrefix + strconv.Itoa(workerID) + *objectNameSuffix
 
-	for i := 0; i < *numOfReadCallPerWorker; i++ {
-		var span trace.Span
-		traceCtx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ctx, "ReadObject")
-		span.SetAttributes(
-			attribute.KeyValue{Key: "bucket", Value: attribute.StringValue(*bucketName)},
-		)
-		start := time.Now()
+	for i := int64(0); i < numCalls || numCalls == -1; i++ {
 		object := bucketHandle.Object(objectName)
-		rc, err := object.NewReader(traceCtx)
+		rc, err := object.NewReader(ctx)
 		if err != nil {
-			return fmt.Errorf("while creating reader object: %v", err)
+			return 0, fmt.Errorf("while creating reader object: %v", err)
 		}
-		firstByteTime := time.Since(start)
-		stats.Record(ctx, firstByteReadLatency.M(float64(firstByteTime.Milliseconds())))
 
 		// Calls Reader.WriteTo implicitly.
-		_, err = io.Copy(io.Discard, rc)
+		count, err := io.Copy(io.Discard, rc)
+		rc.Close()
+		bytesRead += count
 		if err != nil {
-			return fmt.Errorf("while reading and discarding content: %v", err)
-		}
-
-		duration := time.Since(start)
-		stats.Record(ctx, readLatency.M(float64(duration.Milliseconds())))
-
-		err = rc.Close()
-		span.End()
-		if err != nil {
-			return fmt.Errorf("while closing the reader object: %v", err)
+			return 0, fmt.Errorf("while reading and discarding content: %v", err)
 		}
 	}
 
-	return
+	return bytesRead, nil
 }
 
 func main() {
@@ -235,34 +245,38 @@ func main() {
 	// assumes bucket already exist
 	bucketHandle := client.Bucket(*bucketName)
 
-	// Enable stack-driver exporter.
-	registerLatencyView()
-	registerFirstByteLatencyView()
+	var totalBytesRead atomic.Int64
 
-	err = enableSDExporter()
-	if err != nil {
-		fmt.Printf("while enabling stackdriver exporter: %v", err)
-		os.Exit(1)
-	}
-	defer closeSDExporter()
+	warmupCtx, cancelFn := context.WithDeadline(ctx, time.Now().Add(*warmUpTime))
+	fmt.Println("Ramp-up starts")
+
+	rampUp(warmupCtx, cancelFn, bucketHandle)
+
+	fmt.Println("Ramp-up complete. Starting run on actual traffic.")
+	startTime := time.Now()
+	var eG errgroup.Group
 
 	// Run the actual workload
 	for i := 0; i < *numOfWorker; i++ {
 		idx := i
 		eG.Go(func() error {
-			err = ReadObject(ctx, idx, bucketHandle)
+			bytesRead, err := ReadObject(ctx, idx, int64(*numOfReadCallPerWorker), bucketHandle)
 			if err != nil {
 				err = fmt.Errorf("while reading object %v: %w", *objectNamePrefix+strconv.Itoa(idx)+*objectNameSuffix, err)
 				return err
 			}
+			fmt.Printf("Worker returned after reading %d bytes\n", bytesRead)
+			totalBytesRead.Add(bytesRead)
 			return err
 		})
 	}
 
 	err = eG.Wait()
+	totalDuration := time.Since(startTime)
 
 	if err == nil {
-		fmt.Println("Read benchmark completed successfully!")
+		fmt.Printf("Read benchmark completed successfully! Bandwidth: %d MiB/s\n", totalBytesRead.Load()/(int64(totalDuration.Seconds())*MiB))
+		os.Exit(0)
 	} else {
 		fmt.Fprintf(os.Stderr, "Error while running benchmark: %v", err)
 		os.Exit(1)

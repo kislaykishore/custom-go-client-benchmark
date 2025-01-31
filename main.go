@@ -226,9 +226,12 @@ func main() {
 
 	var client *storage.Client
 	var err error
+	protocol := ""
 	if *clientProtocol == "http" {
+		protocol = "http"
 		client, err = CreateHTTPClient(ctx, false)
 	} else {
+		protocol = "grpc"
 		client, err = CreateGrpcClient(ctx)
 	}
 
@@ -250,11 +253,11 @@ func main() {
 	var totalBytesRead atomic.Int64
 
 	warmupCtx, cancelFn := context.WithDeadline(ctx, time.Now().Add(*warmUpTime))
-	fmt.Println("Ramp-up starts")
+	//fmt.Println("Ramp-up starts")
 
 	rampUp(warmupCtx, cancelFn, bucketHandle)
 
-	fmt.Println("Ramp-up complete. Starting run on actual traffic.")
+	//fmt.Println("Ramp-up complete. Starting run on actual traffic.")
 	startTime := time.Now()
 	var eG errgroup.Group
 
@@ -265,7 +268,7 @@ func main() {
 	for i := 0; i < *numOfWorker; i++ {
 		idx := i
 		eG.Go(func() error {
-			fmt.Printf("Worker %d started\n", idx)
+			//fmt.Printf("Worker %d started\n", idx)
 			for {
 				select {
 				case <-actualRunCtx.Done():
@@ -282,7 +285,7 @@ func main() {
 	totalDuration := time.Since(startTime)
 
 	if err == nil && err != context.DeadlineExceeded {
-		fmt.Printf("Read benchmark completed successfully! Bandwidth: %d MiB/s\n", totalBytesRead.Load()/(int64(totalDuration.Seconds())*MiB))
+		fmt.Printf("Protocol: %s, Bandwidth: %d MiB/s\n", protocol, totalBytesRead.Load()/(int64(totalDuration.Seconds())*MiB))
 		os.Exit(0)
 	} else {
 		fmt.Fprintf(os.Stderr, "Error while running benchmark: %v", err)

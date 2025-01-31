@@ -33,7 +33,7 @@ var (
 	// MB means 1024 Kb.
 	MiB = int64(1024 * 1024)
 
-	numOfWorker = flag.Int("worker", 1, "Number of concurrent worker to read")
+	numOfWorker = flag.Int("worker", 128, "Number of concurrent worker to read")
 
 	numOfReadCallPerWorker = flag.Int("read-call-per-worker", 10000, "Number of read call per worker")
 

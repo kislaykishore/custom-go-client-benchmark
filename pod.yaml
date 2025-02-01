@@ -9,7 +9,7 @@ spec:
     cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
   containers:
   - name: gosdk-benchmark
-    image: us-east5-docker.pkg.dev/tpu-prod-env-automated/kislayk/gosdk-benchmark:latest
+    image: $REGION-docker.pkg.dev/$PROJECT_ID/$REPO_NAME/gosdk-benchmark:latest
     command: ["/app"]
-    args: ["--warm-up-time", "1m", "--run-time", "2m", "--worker", "128", "--bucket", "kislayk_fio_east5" ,"--client-protocol", "grpc"]
+    args: ["--warm-up-time", "2m", "--run-time", "5m", "--worker", "128", "--bucket", "$BUCKET_NAME" ,"--client-protocol", "$PROTOCOL"]
   serviceAccountName: default

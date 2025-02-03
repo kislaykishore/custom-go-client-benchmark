@@ -88,7 +88,6 @@ func rampUp(warmupCtx context.Context, cancelFn context.CancelFunc, bucketHandle
 			return
 		default:
 			if idx == *numOfWorkers {
-				fmt.Println("Waiting")
 				eG.Wait()
 				return
 			}

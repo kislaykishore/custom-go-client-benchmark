@@ -21,8 +21,8 @@ import (
 
 var (
 	grpcConnPoolSize    = 1
-	maxConnsPerHost     = 100
-	maxIdleConnsPerHost = 0
+	maxConnsPerHost     = 0
+	maxIdleConnsPerHost = 100
 
 	// MiB means 1024 KiB.
 	MiB = int64(1024 * 1024)

@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: gosdk-benchmark
+  name: gosdk-benchmark-$PROTOCOL-$IDX
 spec:
   restartPolicy: Never
   nodeSelector:
@@ -10,6 +10,10 @@ spec:
   containers:
   - name: gosdk-benchmark
     image: $REGION-docker.pkg.dev/$PROJECT_ID/$REPO_NAME/gosdk-benchmark:latest
+    imagePullPolicy: Always
+    ports:
+    - containerPort: 11021
+      hostPort: 11021
     command: ["/app"]
     args: ["--warm-up-time", "2m", "--run-time", "5m", "--worker", "128", "--bucket", "$BUCKET_NAME" ,"--client-protocol", "$PROTOCOL"]
   serviceAccountName: default

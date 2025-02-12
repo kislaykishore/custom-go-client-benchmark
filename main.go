@@ -20,7 +20,6 @@ import (
 )
 
 var (
-	grpcConnPoolSize    = 1
 	maxConnsPerHost     = 0
 	maxIdleConnsPerHost = 100
 
@@ -32,6 +31,8 @@ var (
 	runTime = flag.Duration("run-time", 3*time.Minute, "Actual workload runtime")
 
 	warmUpTime = flag.Duration("warm-up-time", 2*time.Second, "Ramp up time")
+
+	grpcConnPoolSize = flag.Int("grpc-conn-pool-size", 1, "grpc connection pool size")
 
 	maxRetryDuration = 30 * time.Second
 
@@ -111,7 +112,7 @@ func CreateGrpcClient(ctx context.Context) (client *storage.Client, err error) {
 	if err != nil {
 		return nil, err
 	}
-	return storage.NewGRPCClient(ctx, option.WithGRPCConnectionPool(grpcConnPoolSize), option.WithTokenSource(tokenSource), storage.WithDisabledClientMetrics())
+	return storage.NewGRPCClient(ctx, option.WithGRPCConnectionPool(*grpcConnPoolSize), option.WithTokenSource(tokenSource), storage.WithDisabledClientMetrics())
 }
 
 // ReadObject creates reader object corresponding to workerID with the help of bucketHandle.

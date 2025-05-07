@@ -28,9 +28,9 @@ var (
 
 	numOfWorkers = flag.Int("worker", 128, "Number of concurrent worker to read")
 
-	runTime = flag.Duration("run-time", 3*time.Minute, "Actual workload runtime")
+	runTime = flag.Duration("run-time", 5*time.Minute, "Actual workload runtime")
 
-	warmUpTime = flag.Duration("warm-up-time", 2*time.Second, "Ramp up time")
+	warmUpTime = flag.Duration("warm-up-time", 2*time.Minute, "Ramp up time")
 
 	grpcConnPoolSize = flag.Int("grpc-conn-pool-size", 1, "grpc connection pool size")
 

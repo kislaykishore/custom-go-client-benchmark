@@ -5,9 +5,10 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 
@@ -101,6 +102,14 @@ type objMeta struct {
 	size int64
 }
 
+type task struct {
+	id     int64
+	block  Block
+	name   string
+	offset int64
+	length int64
+}
+
 func main() {
 	flag.Parse()
 	fmt.Printf("Workload start time: %s\n", time.Now().String())
@@ -129,40 +138,91 @@ func main() {
 		}
 		allObjects = append(allObjects, objMeta{name: objAttrs.Name, size: objAttrs.Size})
 	}
-	fmt.Printf("Number of objects: %d\n", len(allObjects))
-	if len(allObjects) < *numOfWorkers {
-		panic(fmt.Sprintf("Can't achieve max concurrency since number of workers: %d is greater than number of objects: %d", *numOfWorkers, len(allObjects)))
+
+	// Create tasks
+	tasks := make([]task, 0, 1024)
+	partitionSize := 200 * MiB
+	for idx, obj := range allObjects {
+		// Break into tasks
+		for offset := int64(0); offset < obj.size; offset += partitionSize {
+			length := partitionSize
+			if obj.size-offset < partitionSize {
+				length = obj.size - offset
+			}
+			tasks = append(tasks, task{id: int64(idx), offset: offset, length: length, name: obj.name})
+		}
 	}
 
-	// Create a reader with the concurrency specified and measure the tail latency.
-	timeTaken := make([]int64, len(allObjects))
+	ch := make(chan task)
+
+	fmt.Printf("Number of tasks identified: %d", len(tasks))
+
+	for idx := range tasks {
+		var err error
+		if tasks[idx].block, err = createBlock(tasks[idx].length); err != nil {
+			panic(err)
+		}
+	}
+	go func() {
+		for _, t := range tasks {
+			ch <- t
+		}
+		close(ch)
+	}()
+
 	var wg sync.WaitGroup
-	wg.Add(len(allObjects))
-	for idx, obj := range allObjects {
+	timeTaken := make([]int64, len(tasks))
+	for i := 0; i < *numOfWorkers; i++ {
+		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			buffer := make([]byte, 2*MiB)
+			t, ok := <-ch
+			if !ok {
+				return
+			}
+			// Process task
+			obj := bucketHandle.Object(t.name)
 			startTime := time.Now()
-			reader, err := bucketHandle.Object(obj.name).NewReader(ctx)
+			reader, err := obj.NewRangeReader(ctx, t.offset, t.length)
+			timeTaken[t.id] = time.Since(startTime).Nanoseconds()
 			if err != nil {
 				panic(err)
 			}
 			defer reader.Close()
-			elapsedTime := time.Since(startTime)
-			timeTaken[idx] = elapsedTime.Nanoseconds()
+			for {
+				n, err := reader.Read(buffer)
+				t.block.Write(buffer[:n])
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					panic(err)
+				}
+			}
 		}()
 	}
 	wg.Wait()
 
 	// Once all returned, compute percentiles
-	sort.Slice(timeTaken, func(i, j int) bool {
-		return timeTaken[i] < timeTaken[j]
-	})
+	slices.Sort(timeTaken)
 
-	fmt.Printf("P50: %d\n", convertNanosToMillis(timeTaken[len(timeTaken)/2]))
-	fmt.Printf("P90: %d\n", convertNanosToMillis(timeTaken[len(timeTaken)*9/10]))
-	fmt.Printf("P95: %d\n", convertNanosToMillis(timeTaken[len(timeTaken)*95/100]))
-	fmt.Printf("P99: %d\n", convertNanosToMillis(timeTaken[len(timeTaken)*99/100]))
-	fmt.Printf("P100: %d\n", convertNanosToMillis(timeTaken[len(timeTaken)-1]))
+	fmt.Printf("P50: %d ms\n", convertNanosToMillis(timeTaken[len(timeTaken)/2]))
+	fmt.Printf("P90: %d ms\n", convertNanosToMillis(timeTaken[len(timeTaken)*9/10]))
+	fmt.Printf("P95: %d ms\n", convertNanosToMillis(timeTaken[len(timeTaken)*95/100]))
+	fmt.Printf("P99: %d ms\n", convertNanosToMillis(timeTaken[len(timeTaken)*99/100]))
+	fmt.Printf("P100: %d ms\n", convertNanosToMillis(timeTaken[len(timeTaken)-1]))
+
+	totalRead := 0
+	for _, t := range tasks {
+		if t.block == nil {
+			panic("Block is nil for some reason")
+		}
+		rd := t.block.Reader()
+		n, _ := io.Copy(io.Discard, rd)
+		totalRead += int(n)
+	}
+	fmt.Printf("Data read: %d bytes\n", totalRead)
 }
 
 func convertNanosToMillis(t int64) int64 {

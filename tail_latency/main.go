@@ -26,6 +26,7 @@ var (
 	MiB = int64(1024 * 1024)
 
 	grpcConnPoolSize = flag.Int("grpc-conn-pool-size", 1, "grpc connection pool size")
+	numOfWorkers     = flag.Int("worker", 128, "Number of concurrent worker to read")
 
 	maxRetryDuration = 30 * time.Second
 
@@ -103,6 +104,9 @@ type objMeta struct {
 func main() {
 	flag.Parse()
 	fmt.Printf("Workload start time: %s\n", time.Now().String())
+	fmt.Printf("Number of workers: %d\n", *numOfWorkers)
+	fmt.Printf("Bucket name: %s\n", *bucketName)
+	fmt.Printf("Client protocol: %s\n", *clientProtocol)
 	ctx := context.Background()
 	client, err := getClient(ctx, *clientProtocol)
 	if err != nil {
@@ -126,6 +130,9 @@ func main() {
 		allObjects = append(allObjects, objMeta{name: objAttrs.Name, size: objAttrs.Size})
 	}
 	fmt.Printf("Number of objects: %d\n", len(allObjects))
+	if len(allObjects) < *numOfWorkers {
+		panic(fmt.Sprintf("Can't achieve max concurrency since number of workers: %d is greater than number of objects: %d", *numOfWorkers, len(allObjects)))
+	}
 
 	// Create a reader with the concurrency specified and measure the tail latency.
 	timeTaken := make([]int64, len(allObjects))

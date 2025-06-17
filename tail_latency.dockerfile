@@ -1,12 +1,11 @@
-FROM golang:1.24
+FROM golang:1.24 as build
 
 WORKDIR /usr/src/app
-
-# pre-copy/cache go.mod for pre-downloading dependencies and only redownloading them in subsequent builds if they change
-COPY go.mod go.sum ./
-RUN go mod download
-
 COPY . .
-RUN go build -C tail_latency -v -o /usr/local/bin/app ./...
+RUN go mod download
+RUN CGO_ENABLED=0 go build -C tail_latency -v -o /usr/bin/app
 
+# Now copy it into our base image.
+FROM gcr.io/distroless/static-debian12
+COPY --from=build /usr/bin/app /
 CMD ["app"]

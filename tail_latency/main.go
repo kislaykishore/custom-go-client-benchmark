@@ -155,7 +155,7 @@ func main() {
 
 	ch := make(chan task)
 
-	fmt.Printf("Number of tasks identified: %d", len(tasks))
+	fmt.Printf("Number of tasks identified: %d\n", len(tasks))
 
 	for idx := range tasks {
 		var err error
@@ -172,37 +172,41 @@ func main() {
 
 	var wg sync.WaitGroup
 	timeTaken := make([]int64, len(tasks))
+	st := time.Now()
 	for i := 0; i < *numOfWorkers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			buffer := make([]byte, 2*MiB)
-			t, ok := <-ch
-			if !ok {
-				return
-			}
-			// Process task
-			obj := bucketHandle.Object(t.name)
-			startTime := time.Now()
-			reader, err := obj.NewRangeReader(ctx, t.offset, t.length)
-			timeTaken[t.id] = time.Since(startTime).Nanoseconds()
-			if err != nil {
-				panic(err)
-			}
-			defer reader.Close()
 			for {
-				n, err := reader.Read(buffer)
-				t.block.Write(buffer[:n])
-				if err == io.EOF {
-					break
+				t, ok := <-ch
+				if !ok {
+					return
 				}
+				// Process task
+				obj := bucketHandle.Object(t.name)
+				startTime := time.Now()
+				reader, err := obj.NewRangeReader(ctx, t.offset, t.length)
+				timeTaken[t.id] = time.Since(startTime).Nanoseconds()
 				if err != nil {
 					panic(err)
+				}
+				defer reader.Close()
+				for {
+					n, err := reader.Read(buffer)
+					t.block.Write(buffer[:n])
+					if err == io.EOF {
+						break
+					}
+					if err != nil {
+						panic(err)
+					}
 				}
 			}
 		}()
 	}
 	wg.Wait()
+	totalReadTimeTaken := time.Since(st).Nanoseconds()
 
 	// Once all returned, compute percentiles
 	slices.Sort(timeTaken)
@@ -213,18 +217,23 @@ func main() {
 	fmt.Printf("P99: %d ms\n", convertNanosToMillis(timeTaken[len(timeTaken)*99/100]))
 	fmt.Printf("P100: %d ms\n", convertNanosToMillis(timeTaken[len(timeTaken)-1]))
 
-	totalRead := 0
+	totalRead := int64(0)
 	for _, t := range tasks {
 		if t.block == nil {
 			panic("Block is nil for some reason")
 		}
 		rd := t.block.Reader()
 		n, _ := io.Copy(io.Discard, rd)
-		totalRead += int(n)
+		totalRead += int64(n)
 	}
 	fmt.Printf("Data read: %d bytes\n", totalRead)
+	fmt.Printf("Total time taken: %d ms\n", convertNanosToMillis(totalReadTimeTaken))
+	fmt.Printf("Throughput: %.2f GiB/sec\n", (float64(totalRead) / float64(1024*1024*1024*convertNanosToSeconds(totalReadTimeTaken))))
 }
 
 func convertNanosToMillis(t int64) int64 {
 	return t / 1000000
+}
+func convertNanosToSeconds(t int64) int64 {
+	return t / 1000000000
 }

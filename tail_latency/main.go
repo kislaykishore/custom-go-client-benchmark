@@ -36,13 +36,14 @@ var (
 	bucketName = flag.String("bucket", "kislayk_europe_west4", "GCS bucket name.")
 
 	clientProtocol = flag.String("client-protocol", "http", "Network protocol.")
+	useGCSFuse     = flag.Bool("use-gcsfuse", false, "")
+	mountDir       = flag.String("mount-dir", "", "")
 )
 
 // CreateHTTPClient create http storage client.
 func CreateHTTPClient(ctx context.Context) (client *storage.Client, err error) {
-	var transport *http.Transport
 	// Using http1 makes the client more performant.
-	transport = &http.Transport{
+	transport := &http.Transport{
 		MaxConnsPerHost:     maxConnsPerHost,
 		MaxIdleConnsPerHost: maxIdleConnsPerHost,
 		// This disables HTTP/2 in transport.
@@ -116,6 +117,9 @@ func main() {
 	fmt.Printf("Number of workers: %d\n", *numOfWorkers)
 	fmt.Printf("Bucket name: %s\n", *bucketName)
 	fmt.Printf("Client protocol: %s\n", *clientProtocol)
+	fmt.Printf("GCSFuse enabled?: %t\n", *useGCSFuse)
+	fmt.Printf("Mount dir: %s\n", *mountDir)
+
 	ctx := context.Background()
 	client, err := getClient(ctx, *clientProtocol)
 	if err != nil {
@@ -131,6 +135,9 @@ func main() {
 		objAttrs, err := itr.Next()
 		if err == iterator.Done {
 			break
+		}
+		if err != nil {
+			panic(err)
 		}
 		if objAttrs.Size == 0 {
 			// Skip
@@ -172,7 +179,11 @@ func main() {
 
 	timeTaken := make([]int64, len(tasks))
 	st := time.Now()
-	processTasks(ctx, ch, timeTaken, bucketHandle)
+	if *useGCSFuse {
+		processTasksUsingGCSFuse(ctx, ch, timeTaken, *mountDir)
+	} else {
+		processTasks(ctx, ch, timeTaken, bucketHandle)
+	}
 
 	totalReadTimeTaken := time.Since(st).Nanoseconds()
 
@@ -219,7 +230,7 @@ func processTasks(ctx context.Context, ch chan task, timeTaken []int64, bucketHa
 				if err != nil {
 					panic(err)
 				}
-				defer reader.Close()
+
 				for {
 					n, err := reader.Read(buffer)
 					t.block.Write(buffer[:n])
@@ -230,6 +241,49 @@ func processTasks(ctx context.Context, ch chan task, timeTaken []int64, bucketHa
 						panic(err)
 					}
 				}
+				reader.Close()
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func processTasksUsingGCSFuse(ctx context.Context, ch chan task, timeTaken []int64, mountDir string) {
+	var wg sync.WaitGroup
+	for i := 0; i < *numOfWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			buffer := make([]byte, 2*MiB)
+			for {
+				t, ok := <-ch
+				if !ok {
+					return
+				}
+				// Process task
+				startTime := time.Now()
+				timeTaken[t.id] = time.Since(startTime).Nanoseconds()
+				reader, err := os.Open(fmt.Sprintf("%s/%s", mountDir, t.name))
+				reader.Seek(t.offset, 0)
+				if err != nil {
+					panic(err)
+				}
+				dataRead := 0
+				for {
+					n, err := reader.Read(buffer)
+					if dataRead+n > int(t.length) {
+						n = int(t.length) - dataRead
+					}
+					dataRead += n
+					t.block.Write(buffer[:n])
+					if err == io.EOF {
+						break
+					}
+					if err != nil {
+						panic(err)
+					}
+				}
+				reader.Close()
 			}
 		}()
 	}
